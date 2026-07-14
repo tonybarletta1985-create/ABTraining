@@ -1,0 +1,74 @@
+name: Save Run Data
+
+on:
+  repository_dispatch:
+    types: [run-data]
+
+jobs:
+  save-run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Save run file
+        env:
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        run: |
+          # Extract workout data from payload
+          echo "$PAYLOAD" > /tmp/raw_payload.json
+          
+          # Check if this contains an outdoor run
+          HAS_RUN=$(echo "$PAYLOAD" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          workouts = data.get('data', {}).get('workouts', [])
+          has_run = any(
+            w.get('location') == 'Outdoor' and w.get('walkingAndRunningDistance')
+            for w in workouts
+          )
+          print('true' if has_run else 'false')
+          " 2>/dev/null || echo "false")
+          
+          if [ "$HAS_RUN" != "true" ]; then
+            echo "No outdoor run found in payload — skipping"
+            exit 0
+          fi
+          
+          # Build filename using AEST time
+          FILENAME="run-$(TZ='Australia/Sydney' date '+%Y-%m-%d-%H%M').json"
+          FILEPATH="data/runs/$FILENAME"
+          
+          echo "Writing $FILEPATH"
+          echo "$PAYLOAD" > "$FILEPATH"
+          
+          git config user.name "AB Training Bot"
+          git config user.email "actions@github.com"
+          git add "$FILEPATH"
+          git commit -m "Add $FILENAME"
+          git push
+
+      - name: Clean up old run files
+        run: |
+          # Delete run files older than 2 days
+          CUTOFF=$(TZ='Australia/Sydney' date -d '2 days ago' '+%Y-%m-%d' 2>/dev/null || TZ='Australia/Sydney' date -v-2d '+%Y-%m-%d')
+          
+          git config user.name "AB Training Bot"
+          git config user.email "actions@github.com"
+          
+          DELETED=0
+          for f in data/runs/run-*.json; do
+            [ -f "$f" ] || continue
+            FILEDATE=$(basename "$f" | grep -oP '\d{4}-\d{2}-\d{2}' | head -1)
+            if [ ! -z "$FILEDATE" ] && [ "$FILEDATE" < "$CUTOFF" ]; then
+              git rm "$f"
+              DELETED=$((DELETED + 1))
+            fi
+          done
+          
+          if [ $DELETED -gt 0 ]; then
+            git commit -m "Remove $DELETED old run files"
+            git push
+          else
+            echo "No old files to clean up"
+          fi
